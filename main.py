@@ -7,6 +7,7 @@ import time
 import torch
 import torch.backends.cudnn as cudnn
 import json
+import wandb
 
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from timm.scheduler import create_scheduler
 from timm.optim import create_optimizer
 from timm.utils import NativeScaler, get_state_dict, ModelEma
 
-from datasets import build_dataset
+from dataset import build_dataset
 from engine import train_one_epoch, evaluate
 from losses import DistillationLoss
 from samplers import RASampler
@@ -156,7 +157,7 @@ def get_args_parser():
     # Dataset parameters
     parser.add_argument('--data-path', default='/datasets01/imagenet_full_size/061417/', type=str,
                         help='dataset path')
-    parser.add_argument('--data-set', default='IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19'],
+    parser.add_argument('--data-set', default='HF_IMNET', choices=['CIFAR', 'IMNET', 'INAT', 'INAT19', 'HF_IMNET'],
                         type=str, help='Image Net dataset path')
     parser.add_argument('--inat-category', default='name',
                         choices=['kingdom', 'phylum', 'class', 'order', 'supercategory', 'family', 'genus', 'name'],
@@ -185,10 +186,17 @@ def get_args_parser():
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--dist_url', default='env://', help='url used to set up distributed training')
+
+    # acceleration parameters
+    parser.add_argument("--compiled", action='store_true', help="Use PyTorch 2.0 compiled model if True")
+    parser.add_argument("--bfloat16", action='store_true', help="Use bfloat16 precision for training (default: False)")
     return parser
 
 
 def main(args):
+
+    wandb.init(project="deit", name=args.model + "_finetune" if args.finetune else args.model + "_train", config=args)
+
     utils.init_distributed_mode(args)
 
     print(args)
@@ -270,7 +278,10 @@ def main(args):
         img_size=args.input_size
     )
 
-                    
+    if args.compiled:
+        model = torch.compile(model)
+        print("Compiled the model using torch.compile.")
+
     if args.finetune:
         if args.finetune.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -468,6 +479,8 @@ def main(args):
                      **{f'test_{k}': v for k, v in test_stats.items()},
                      'epoch': epoch,
                      'n_parameters': n_parameters}
+        
+        wandb.log(log_stats)
         
         
         
