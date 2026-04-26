@@ -43,7 +43,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
         if args.bce_loss:
             targets = targets.gt(0.0).type(targets.dtype)
          
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda"), dtype=torch.bfloat16 if args.bfloat16 else None):
             outputs = model(samples)
             if not args.cosub:
                 loss = criterion(samples, outputs, targets)
@@ -94,7 +94,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
             output = model(images)
             loss = criterion(output, target)
 
