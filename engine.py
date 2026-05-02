@@ -29,8 +29,10 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
     
     if args.cosub:
         criterion = torch.nn.BCEWithLogitsLoss()
-        
-    for samples, targets in metric_logger.log_every(data_loader, print_freq, header):
+    accum_iter = max(1, args.accum_iter)
+    optimizer.zero_grad()
+
+    for data_iter_step, (samples, targets) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -60,15 +62,19 @@ def train_one_epoch(model: torch.nn.Module, criterion: DistillationLoss,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
-        optimizer.zero_grad()
+        loss = loss / accum_iter
+        need_update = ((data_iter_step + 1) % accum_iter == 0) or (data_iter_step + 1 == len(data_loader))
 
         # this attribute is added by timm on one optimizer (adahessian)
         is_second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
         loss_scaler(loss, optimizer, clip_grad=max_norm,
-                    parameters=model.parameters(), create_graph=is_second_order)
+                    parameters=model.parameters(), create_graph=is_second_order, need_update=need_update)
+
+        if need_update:
+            optimizer.zero_grad()
 
         torch.cuda.synchronize()
-        if model_ema is not None:
+        if model_ema is not None and need_update:
             model_ema.update(model)
 
         metric_logger.update(loss=loss_value)
@@ -94,7 +100,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
+        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda"), dtype=torch.bfloat16 if args.bfloat16 else None):
             output = model(images)
             loss = criterion(output, target)
 

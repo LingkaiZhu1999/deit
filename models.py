@@ -5,7 +5,7 @@ from functools import partial
 
 from timm.models.deit import _create_deit, VisionTransformerDistilled
 from timm.models.vision_transformer import VisionTransformer
-from timm.models.registry import register_model
+# from timm.models.registry import register_model
 
 # __all__ = [
 #     'deit_tiny_patch16_224', 'deit_small_patch16_224', 'deit_base_patch16_224',

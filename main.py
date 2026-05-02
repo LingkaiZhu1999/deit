@@ -29,10 +29,16 @@ import models_v2
 
 import utils
 
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.set_float32_matmul_precision("high")
+torch.cuda.empty_cache()
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DeiT training and evaluation script', add_help=False)
     parser.add_argument('--batch-size', default=64, type=int)
+    parser.add_argument('--accum-iter', default=1, type=int,
+                        help='gradient accumulation steps (default: 1)')
     parser.add_argument('--epochs', default=300, type=int)
     parser.add_argument('--bce-loss', action='store_true')
     parser.add_argument('--unscale-lr', action='store_true')
@@ -246,6 +252,8 @@ def main(args):
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         pin_memory=args.pin_mem,
+        persistent_workers=True,
+        prefetch_factor=2,
         drop_last=True,
     )
     if args.ThreeAugment:
@@ -287,7 +295,7 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.finetune, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.finetune, map_location='cpu')
+            checkpoint = torch.load(args.finetune, map_location='cpu', weights_only=False)
 
         checkpoint_model = checkpoint['model']
         state_dict = model.state_dict()
@@ -297,7 +305,7 @@ def main(args):
                 del checkpoint_model[k]
 
         # interpolate position embedding
-        pos_embed_checkpoint = checkpoint_model['pos_embed']
+        pos_embed_checkpoint = checkpoint_model['_orig_mod.pos_embed']
         embedding_size = pos_embed_checkpoint.shape[-1]
         num_patches = model.patch_embed.num_patches
         num_extra_tokens = model.pos_embed.shape[-2] - num_patches
@@ -314,7 +322,7 @@ def main(args):
             pos_tokens, size=(new_size, new_size), mode='bicubic', align_corners=False)
         pos_tokens = pos_tokens.permute(0, 2, 3, 1).flatten(1, 2)
         new_pos_embed = torch.cat((extra_tokens, pos_tokens), dim=1)
-        checkpoint_model['pos_embed'] = new_pos_embed
+        checkpoint_model['_orig_mod.pos_embed'] = new_pos_embed
 
         model.load_state_dict(checkpoint_model, strict=False)
         
@@ -357,9 +365,14 @@ def main(args):
         model_without_ddp = model.module
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print('number of params:', n_parameters)
+    if args.accum_iter < 1:
+        raise ValueError("--accum-iter must be >= 1")
+
     if not args.unscale_lr:
-        linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
+        effective_batch_size = args.batch_size * args.accum_iter * utils.get_world_size()
+        linear_scaled_lr = args.lr * effective_batch_size / 512.0
         args.lr = linear_scaled_lr
+        print(f"Scaled LR to {args.lr:.6g} for effective batch size {effective_batch_size}")
     optimizer = create_optimizer(args, model_without_ddp)
     loss_scaler = NativeScaler()
 
@@ -392,7 +405,7 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.teacher_path, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.teacher_path, map_location='cpu')
+            checkpoint = torch.load(args.teacher_path, map_location='cpu', weights_only=False)
         teacher_model.load_state_dict(checkpoint['model'])
         teacher_model.to(device)
         teacher_model.eval()
@@ -409,13 +422,21 @@ def main(args):
             checkpoint = torch.hub.load_state_dict_from_url(
                 args.resume, map_location='cpu', check_hash=True)
         else:
-            checkpoint = torch.load(args.resume, map_location='cpu')
+            checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
         model_without_ddp.load_state_dict(checkpoint['model'])
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
             args.start_epoch = checkpoint['epoch'] + 1
             if args.model_ema:
+                # added for compiled model
+                new_state_dict = {}
+                for k in checkpoint['ema_model'].keys():
+                    # add _orig_mod. to the keys if not present, to be compatible with both compiled and non-compiled checkpoints
+                    new_k = k.replace('module.', 'module._orig_mod.') if not k.startswith('module._orig_mod.') else k
+                    new_state_dict[new_k] = checkpoint['ema_model'][k]
+                checkpoint['model_ema'] = new_state_dict
+
                 utils._load_checkpoint_for_ema(model_ema, checkpoint['model_ema'])
             if 'scaler' in checkpoint:
                 loss_scaler.load_state_dict(checkpoint['scaler'])
@@ -481,8 +502,6 @@ def main(args):
                      'n_parameters': n_parameters}
         
         wandb.log(log_stats)
-        
-        
         
         
         if args.output_dir and utils.is_main_process():
