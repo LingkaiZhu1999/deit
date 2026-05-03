@@ -100,7 +100,7 @@ def evaluate(data_loader, model, device):
         target = target.to(device, non_blocking=True)
 
         # compute output
-        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda"), dtype=torch.bfloat16 if args.bfloat16 else None):
+        with torch.amp.autocast(device_type=device.type, enabled=(device.type == "cuda")):
             output = model(images)
             loss = criterion(output, target)
 
